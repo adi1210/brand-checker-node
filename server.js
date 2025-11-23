@@ -9,54 +9,95 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({
-  model: "gemini-2.5-flash",
-  generationConfig: { temperature: 0.1 }
-});
+//  API KEY ROTATION SETUP
+const API_KEYS = [
+  process.env.GEMINI_API_KEY1,
+  process.env.GEMINI_API_KEY2,
+  process.env.GEMINI_API_KEY3,
+  process.env.GEMINI_API_KEY4,
+].filter(Boolean); // remove undefined keys
 
-// Helpers
+//  FALLBACK FUNCTION
+async function generateWithFallback(prompt) {
+  let lastError = null;
+
+  for (const key of API_KEYS) {
+    try {
+
+      const genAI = new GoogleGenerativeAI(key);
+      const model = genAI.getGenerativeModel({
+        model: "gemini-2.5-flash",
+        generationConfig: { temperature: 0.1 },
+      });
+
+      const result = await model.generateContent(prompt);
+      return result.response.text();
+
+    } catch (err) {
+      lastError = err;
+      continue; // try next key
+    }
+  }
+
+  // If ALL KEYS FAIL
+  throw lastError;
+}
+
+// Calculate real position in the numbered list
+function getBrandPosition(answerText, brand) {
+  const lines = answerText.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const cleanLine = lines[i].replace(/^\d+\.\s*/, ""); // remove "1. " prefix
+    if (normalize(cleanLine) === normalize(brand)) {
+      return i + 1; // index is 0-based → convert to 1-based
+    }
+  }
+  return null;
+}
+
+//  HELPERS
 const normalize = (str) =>
   str.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 const fuzzyIncludes = (text, brand) =>
   normalize(text).includes(normalize(brand));
 
+// API Endpoints Routes
 app.post("/check", async (req, res) => {
   const { prompt, brand } = req.body;
 
-  const structuredPrompt = `You are an assistant that returns a clean, numbered list of tools, platforms, or products 
-        mentioned in your answer based on the user's query below.
-
-        User query:
-        "${prompt}"
-
-        Your job:
-        1. Understand the user's query
-        2. Produce ONLY a numbered list (1, 2, 3...)
-        3. Each item must be one product/tool/platform name only
-        4. Do NOT add explanations
-        5. Do NOT add extra text before or after the list
-        6. Always return at least 5 items if possible
-
-        Example output:
-        1. Salesforce
-        2. HubSpot
-        3. Zoho CRM
-        4. Microsoft Dynamics
-        5. Pipedrive
-
-        Now produce the list.`;
-
   if (!prompt || !brand) {
     return res.status(400).json({
-      error: "Prompt and Brand are required"
+      error: "Prompt and Brand are required",
     });
   }
 
+  const structuredPrompt = `You are an assistant that returns a clean, numbered list of tools, platforms, or products 
+      mentioned in your answer based on the user's query below.
+
+      User query:
+      "${prompt}"
+
+      Your job:
+      1. Understand the user's query
+      2. Produce ONLY a numbered list (1, 2, 3...)
+      3. Each item must be one product/tool/platform name only
+      4. Do NOT add explanations
+      5. Do NOT add extra text before or after the list
+      6. Always return at least 5 items if possible
+
+      Example output:
+      1. Salesforce
+      2. HubSpot
+      3. Zoho CRM
+      4. Microsoft Dynamics
+      5. Pipedrive
+
+      Now produce the list.`;
+
   try {
-    const result = await model.generateContent(structuredPrompt);
-    const text = result.response.text();
+    // Try all API keys with automatic fallback
+    const text = await generateWithFallback(structuredPrompt);
 
     const mentioned = fuzzyIncludes(text, brand);
     let position = null;
@@ -65,25 +106,23 @@ app.post("/check", async (req, res) => {
       const normText = normalize(text);
       const normBrand = normalize(brand);
       const index = normText.indexOf(normBrand);
-      position = index !== -1 ? 1 : null;
+      position = getBrandPosition(text, normBrand);
     }
 
     return res.json({
       prompt,
       mentioned: mentioned ? "Yes" : "No",
-      position: position,
-      answer: text
+      position,
+      answer: text,
     });
 
   } catch (err) {
-    console.log(err);
-
-    // CANNED ERROR ANSWER
+    console.error("All API keys failed:", err);
     return res.json({
       prompt,
       mentioned: "No",
       position: null,
-      error: "Gemini unavailable — fallback used."
+      error: "All Gemini API keys failed — fallback used.",
     });
   }
 });
